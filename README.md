@@ -21,7 +21,7 @@ A forensic, zero-trust QA auditing skill for **OpenClaw**. This skill performs d
 ### From ClawHub (Recommended)
 
 ```bash
-clawhub install shifulegend/qa-architecture-auditor
+clawhub install qa-architecture-auditor
 ```
 
 ### Manual Install
