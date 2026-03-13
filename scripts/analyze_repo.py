@@ -17,8 +17,9 @@ import json
 import argparse
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, cast
 from dataclasses import dataclass, asdict
+from datetime import datetime
 import re
 
 @dataclass
@@ -36,6 +37,9 @@ class CodebaseAnalysis:
     security_surface: Dict[str, List[str]]
     test_coverage_current: float  # will be near 0 due to zero-trust
     itgc_controls: List[str]
+    analysis_date: str = '2026-03-13'
+    compliance_framework: str = 'itgc'
+    security_scan_performed: bool = False
 
 class QAAuditor:
     """Independent Principal QA Architect - Zero Trust Analysis"""
@@ -63,6 +67,8 @@ class QAAuditor:
         'json': ['.json'],
         'xml': ['.xml'],
         'markdown': ['.md', '.markdown'],
+        'docker': ['Dockerfile', 'docker-compose.yml'],
+        'terraform': ['.tf', '.tfvars'],
     }
 
     FRAMEWORK_INDICATORS = {
@@ -79,12 +85,17 @@ class QAAuditor:
         'laravel': ['laravel', 'artisan'],
         'aspnet': ['.csproj', 'Startup.cs', 'Program.cs'],
         'dotnet': ['.csproj', 'nuget'],
+        'tailwind': ['tailwind', 'tailwindcss'],
+        'nextjs': ['next', 'next.config.js'],
+        'vite': ['vite', 'vite.config'],
+        'cypress': ['cypress', 'cypress.config'],
+        'playwright': ['playwright', 'playwright.config'],
     }
 
-    def __init__(self, repo_path: str, exclude_dirs: List[str] = None):
+    def __init__(self, repo_path: str, exclude_dirs: Optional[List[str]] = None):
         self.repo_path = Path(repo_path).resolve()
         self.exclude_dirs = exclude_dirs or ['node_modules', '.git', '__pycache__', '.venv', 'venv', 'env', 'dist', 'build', 'target', 'bin', 'obj']
-        self.analysis = None
+        self.analysis: Optional[CodebaseAnalysis] = None
 
     def analyze(self) -> CodebaseAnalysis:
         """Perform complete forensic analysis"""
@@ -100,27 +111,57 @@ class QAAuditor:
         data_flows = self._analyze_data_flows(modules)
         security_surface = self._map_security_surface(modules)
         itgc_controls = self._identify_itgc_controls()
+        # compatibility_recommendations = self._generate_compatibility_recs_simple(languages, frameworks)
         
         # Zero-trust: assume no current test coverage
         test_coverage_current = 0.0
         
-        self.analysis = CodebaseAnalysis(
+        # Safe max detection for main_lang
+        if languages:
+            items = list(languages.items())
+            main_lang = max(items, key=lambda x: x[1])[0]
+        else:
+            main_lang = 'unknown'
+            
+        # Update architecture based on main_lang if it's a simple monolith
+        if architecture == 'monolithic' and main_lang != 'unknown':
+            architecture = f"{main_lang.capitalize()} Monolith"
+
+        # Consolidate results
+        languages = self._detect_languages()
+        frameworks = self._detect_frameworks()
+        architecture = self._detect_architecture()
+        dependencies = self._analyze_dependencies() # Changed from _detect_dependencies to _analyze_dependencies to match existing method
+        modules = self._map_modules()
+        risk_assessment = self._assess_risks(modules, dependencies) # Kept dependencies as argument to _assess_risks
+        data_flows = self._analyze_data_flows(modules)
+        security_surface = self._map_security_surface(modules)
+        itgc_controls = self._identify_itgc_controls()
+        
+        # Zero-trust: assume no current test coverage
+        test_coverage_current = 0.0
+        
+        analysis = CodebaseAnalysis(
             repo_path=str(self.repo_path),
             languages=languages,
             frameworks=frameworks,
             architecture=architecture,
             dependencies=dependencies,
             modules=modules,
-            risk_assessment=sorted(risk_assessment, key=lambda x: x['risk_score'], reverse=True),
-            entry_points=entry_points,
             data_flows=data_flows,
             security_surface=security_surface,
+            itgc_controls=itgc_controls,
             test_coverage_current=test_coverage_current,
-            itgc_controls=itgc_controls
+            risk_assessment=sorted(risk_assessment, key=lambda x: x['risk_score'], reverse=True), # Added sorting back
+            entry_points=entry_points, # Kept entry_points
+            analysis_date=datetime.now().strftime('%Y-%m-%d'),
+            compliance_framework='itgc',
+            security_scan_performed=False
         )
         
+        self.analysis = analysis
         print(f"✅ Analysis complete. Found {len(modules)} modules, {len(risk_assessment)} risk areas.")
-        return self.analysis
+        return analysis
 
     def _should_exclude(self, path: Path) -> bool:
         """Check if path should be excluded from analysis"""
@@ -170,7 +211,7 @@ class QAAuditor:
                                     frameworks.append(framework)
                                     indicators_found.add(framework)
                                     break
-                except:
+                except Exception:
                     pass
 
         return list(set(frameworks))
@@ -198,7 +239,7 @@ class QAAuditor:
                     for kw in keywords:
                         if kw.lower() in content:
                             scores[arch] += 1
-            except:
+            except Exception:
                 pass
 
         # Also check directory structure
@@ -227,7 +268,7 @@ class QAAuditor:
                     for dep in deps:
                         dep['file'] = str(file.relative_to(self.repo_path))
                         dependencies.append(dep)
-                except:
+                except Exception:
                     pass
 
         return dependencies
@@ -262,7 +303,7 @@ class QAAuditor:
                             'ecosystem': 'pypi'
                         })
             # Add more parsers as needed
-        except:
+        except Exception:
             pass
         return deps
 
@@ -273,7 +314,7 @@ class QAAuditor:
         for ext, lang_files in self.LANGUAGE_EXTENSIONS.items():
             for file_extension in lang_files:
                 for file in self.repo_path.rglob(f'*{file_extension}'):
-                    if self._should_exclude(file) or file.name.startswith('.'):
+                    if self._should_exclude(file):
                         continue
                     
                     try:
@@ -282,9 +323,11 @@ class QAAuditor:
                         
                         # Calculate metrics
                         lines = content.count('\n') + 1
-                        functions = len(re.findall(r'^\s*(def|function|func|public|private|protected)?\s+\w+\s*\(', content, re.MULTILINE))
-                        classes = len(re.findall(r'^\s*(class|struct|interface|trait|module)\s+\w+', content, re.MULTILINE))
-                        imports = len(re.findall(r'^(import|require|using|include|from\s+\S+\s+import)', content, re.MULTILINE))
+                        # Improved regex for better forensic detection
+                        # Detects Python, JS, TS, Java, Go, etc.
+                        functions = len(re.findall(r'(\bdef\b|\bfunction\b|\bfunc\b|\bpublic\b|\bprivate\b|\bprotected\b)\s+\w+\s*\(', content))
+                        classes = len(re.findall(r'(\bclass\b|\bstruct\b|\binterface\b|\btrait\b|\bmodule\b)\s+\w+', content))
+                        imports = len(re.findall(r'^(\bimport\b|\brequire\b|\busing\b|\binclude\b|\bfrom\b\s+\S+\s+\bimport\b)', content, re.MULTILINE))
                         
                         # Calculate cyclomatic complexity approximation
                         complexity = content.count('if ') + content.count('else') + content.count('for ') + \
@@ -297,7 +340,12 @@ class QAAuditor:
                         crypto_usage = bool(re.search(r'crypto|encrypt|decrypt|hash|aes|rsa|sha', content.lower()))
                         file_io = bool(re.search(r'open\(|read_file|write_file|fs\.', content.lower()))
                         
+                        # Forensic: Hardcoded Secrets Detection (Basic)
+                        secrets = len(re.findall(r'(password|api_key|apikey|secret|token|password|auth|credential)\s*[:=]\s*["\'][\w\-]{8,}["\']', content.lower()))
+                        
                         risk_factors = []
+                        if secrets > 0:
+                            risk_factors.append('hardcoded_secrets')
                         if complexity > 15:
                             risk_factors.append('high_complexity')
                         if external_calls > 5:
@@ -315,7 +363,7 @@ class QAAuditor:
                         
                         # Calculate risk score (0-100)
                         risk_score = min(100, (complexity * 2) + (external_calls * 3) + (handles_auth * 15) + 
-                                        (handles_data * 10) + (crypto_usage * 20) + (file_io * 5))
+                                        (handles_data * 10) + (crypto_usage * 20) + (file_io * 5) + (secrets * 25))
                         
                         module = {
                             'path': str(rel_path),
@@ -478,10 +526,13 @@ class QAAuditor:
         
         # Create simple dependency chains
         for module_path, imports in imports_by_module.items():
-            for imp in imports[:3]:  # limit to top 3 for report clarity
+            # Forensic: limit to top items for report clarity
+            import_list = list(imports)
+            for imp in import_list[:3]:
+                imp_str = str(imp)
                 data_flows.append({
                     'source': module_path,
-                    'imports': str(imp)[:100],
+                    'imports': imp_str[:100],
                     'type': 'dependency'
                 })
         
@@ -499,6 +550,10 @@ class QAAuditor:
             'file_operations': [],
             'network_operations': [],
             'database_operations': [],
+            'usability': [],
+            'accessibility': [],
+            'localization': [],
+            'monitoring': [],
         }
         
         for module in modules:
@@ -524,7 +579,15 @@ class QAAuditor:
                     security_surface['network_operations'].append(path)
                 if re.search(r'select|insert|update|delete|execute|query', content):
                     security_surface['database_operations'].append(path)
-            except:
+                if re.search(r'ui|view|layout|page|element|label|form', content):
+                    security_surface['usability'].append(path)
+                if re.search(r'aria|screen.*reader|alt=|[role=]|tabindex', content):
+                    security_surface['accessibility'].append(path)
+                if re.search(r'i18n|l10n|translate|locale|dateformat', content):
+                    security_surface['localization'].append(path)
+                if re.search(r'log|monitor|trace|telemetry|metric', content):
+                    security_surface['monitoring'].append(path)
+            except Exception:
                 continue
         
         return security_surface
@@ -544,96 +607,94 @@ class QAAuditor:
             "Incident Response: Defined procedures for security incidents and data breaches",
         ]
         
-        # Add specific controls based on detected tech stack
-        if any(lang in self.analysis.languages for lang in ['python', 'javascript', 'typescript', 'java']):
-            controls.append("Static Analysis: Mandatory SAST scanning with tools like SonarQube, CodeQL, or Snyk")
-        
-        if 'sql' in self.analysis.languages or self.analysis.security_surface['database_operations']:
-            controls.append("Database Change Management: Schema changes via migration scripts with review and backup")
-        
-        if self.analysis.security_surface['authentication']:
-            controls.append("Credential Management: Secrets must be stored in vaults; never in code or config")
-        
-        if self.analysis.architecture in ['microservices', 'serverless']:
-            controls.append("API Security: All APIs require authentication, rate limiting, and input validation")
+        analysis = self.analysis
+        if analysis:
+            # Add specific controls based on detected tech stack
+            if any(lang in analysis.languages for lang in ['python', 'javascript', 'typescript', 'java']):
+                controls.append("Static Analysis: Mandatory SAST scanning with tools like SonarQube, CodeQL, or Snyk")
+            
+            if 'sql' in analysis.languages or analysis.security_surface.get('database_operations'):
+                controls.append("Database Change Management: Schema changes via migration scripts with review and backup")
+            
+            if analysis.security_surface.get('authentication'):
+                controls.append("Credential Management: Secrets must be stored in vaults; never in code or config")
+            
+            if analysis.architecture in ['microservices', 'serverless']:
+                controls.append("API Security: All APIs require authentication, rate limiting, and input validation")
         
         return controls
 
     def generate_report(self, format: str = 'html', include_test_cases: bool = True) -> str:
         """Generate comprehensive testing strategy report"""
         if not self.analysis:
-            raise ValueError("Analysis must be run first")
+            self.analyze()
+            
+        if not self.analysis:
+            return "Error: Analysis failed"
 
         if format == 'html':
-            return self._generate_html_report(include_test_cases)
+            return self._generate_html_report(self.analysis, include_test_cases)
         elif format == 'md':
             return self._generate_markdown_report(include_test_cases)
         else:
             raise ValueError(f"Unsupported format: {format}")
 
-    def _generate_html_report(self, include_test_cases: bool) -> str:
-        """Generate HTML report with full styling"""
-        analysis = self.analysis
-        
+    def _generate_html_report(self, analysis: CodebaseAnalysis, include_test_cases: bool) -> str:
+        """Generate the HTML report using internal analysis results"""
+        # Ensure analysis is not None
+        if not analysis:
+            return "<html><body><h1>Error: Analysis results missing</h1></body></html>"
+            
+        # Improved type safety for f-string indexing
+        risk_list = list(analysis.risk_assessment)
+        risk_entries = risk_list[:15]
+        entry_list = list(analysis.entry_points)
+        top_entries = entry_list[:5]
+        lang_keys = list(analysis.languages.keys())
+        frame_list = list(analysis.frameworks)
+        dep_list = list(analysis.dependencies)
         html = f'''<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>QA Architecture & Testing Strategy Report</title>
+    <title>QA Architecture Auditor - Strategy Report</title>
     <style>
-        :root {{
-            --primary: #1a365d;
-            --secondary: #2c5282;
-            --accent: #4299e1;
-            --bg-light: #f7fafc;
-            --text-dark: #2d3748;
-            --border: #e2e8f0;
-            --danger: #f56565;
-            --warning: #ed8936;
-            --success: #48bb78;
-        }}
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.6; max-width: 1200px; margin: 0 auto; padding: 2rem; color: var(--text-dark); background: var(--bg-light); }}
-        h1, h2, h3, h4 {{ color: var(--primary); margin-top: 2rem; }}
-        h1 {{ border-bottom: 3px solid var(--accent); padding-bottom: 0.5rem; }}
-        h2 {{ border-bottom: 1px solid var(--border); padding-bottom: 0.3rem; }}
-        .executive-summary {{ background: white; padding: 1.5rem; border-radius: 8px; border-left: 4px solid var(--accent); margin: 1.5rem 0; }}
-        .risk-high {{ color: var(--danger); font-weight: bold; }}
-        .risk-medium {{ color: var(--warning); font-weight: bold; }}
-        .risk-low {{ color: var(--success); font-weight: bold; }}
-        table {{ width: 100%; border-collapse: collapse; margin: 1rem 0; background: white; border-radius: 8px; overflow: hidden; }}
-        th, td {{ padding: 0.75rem; text-align: left; border-bottom: 1px solid var(--border); }}
-        th {{ background: var(--primary); color: white; font-weight: 600; }}
-        tr:hover {{ background: var(--bg-light); }}
-        .methodology-card {{ background: white; padding: 1.5rem; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin: 1rem 0; }}
-        .test-case {{ background: #edf2f7; padding: 1rem; border-radius: 6px; margin: 0.5rem 0; border-left: 3px solid var(--accent); }}
-        .test-case pre {{ margin: 0; overflow-x: auto; }}
-        .tool-recommendation {{ background: #f0fff4; padding: 1rem; border-radius: 6px; margin: 0.5rem 0; border-left: 3px solid var(--success); }}
-        .stats-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin: 1.5rem 0; }}
-        .stat-card {{ background: white; padding: 1.5rem; border-radius: 8px; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
-        .stat-value {{ font-size: 2.5rem; font-weight: bold; color: var(--accent); }}
-        .stat-label {{ color: var(--secondary); font-weight: 600; }}
-        .itgc-list {{ list-style: none; padding: 0; }}
-        .itgc-list li {{ background: white; padding: 1rem; margin: 0.5rem 0; border-radius: 6px; border-left: 3px solid var(--secondary); }}
-        code {{ background: #edf2f7; padding: 0.2rem 0.4rem; border-radius: 4px; font-size: 0.9em; }}
-        pre {{ background: #2d3748; color: #f7fafc; padding: 1rem; border-radius: 8px; overflow-x: auto; }}
-        pre code {{ background: transparent; color: inherit; }}
-        .footer {{ margin-top: 3rem; padding-top: 1rem; border-top: 2px solid var(--border); color: var(--secondary); font-size: 0.9rem; }}
+        body {{ font-family: 'Inter', system-ui, -apple-system, sans-serif; line-height: 1.6; color: #1a1a1a; max-width: 1200px; margin: 0 auto; padding: 2rem; background: #f8fafc; }}
+        h1, h2, h3 {{ color: #0f172a; border-bottom: 2px solid #e2e8f0; padding-bottom: 0.5rem; }}
+        .header {{ background: #1e293b; color: white; padding: 2rem; border-radius: 8px; margin-bottom: 2rem; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); }}
+        .header h1 {{ color: #38bdf8; border: none; margin: 0; }}
+        .risk-critical {{ background: #fecaca; color: #991b1b; font-weight: bold; padding: 2px 6px; border-radius: 4px; }}
+        .risk-high {{ background: #fed7aa; color: #9a3412; font-weight: bold; padding: 2px 6px; border-radius: 4px; }}
+        .risk-medium {{ background: #fef08a; color: #854d0e; padding: 2px 6px; border-radius: 4px; }}
+        .risk-low {{ background: #dcfce7; color: #166534; padding: 2px 6px; border-radius: 4px; }}
+        table {{ width: 100%; border-collapse: collapse; margin: 1rem 0; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px 0 rgba(0,0,0,0.1); }}
+        th, td {{ padding: 12px 16px; text-align: left; border-bottom: 1px solid #e2e8f0; }}
+        th {{ background: #f1f5f9; font-weight: 600; text-transform: uppercase; font-size: 0.8rem; letter-spacing: 0.025em; }}
+        .methodology-card {{ background: white; padding: 1.5rem; border-radius: 8px; margin-bottom: 1.5rem; border-left: 4px solid #3b82f6; box-shadow: 0 1px 3px 0 rgba(0,0,0,0.1); }}
+        .stats-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 2rem; }}
+        .stat-card {{ background: white; padding: 1.5rem; border-radius: 8px; text-align: center; box-shadow: 0 1px 3px 0 rgba(0,0,0,0.1); }}
+        .stat-value {{ font-size: 2rem; font-weight: 800; color: #2563eb; }}
+        .stat-label {{ font-size: 0.875rem; color: #64748b; text-transform: uppercase; font-weight: 600; }}
+        .test-case {{ background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 1rem; margin-top: 1rem; }}
+        pre {{ background: #1e293b; color: #f8fafc; padding: 1rem; border-radius: 4px; overflow-x: auto; font-size: 0.9rem; }}
+        code {{ font-family: 'Fira Code', monospace; }}
+        .footer {{ margin-top: 4rem; text-align: center; color: #64748b; font-size: 0.875rem; border-top: 1px solid #e2e8f0; padding-top: 2rem; }}
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>🌀 QA Architecture & Testing Strategy Report</h1>
-        <p><strong>Independent Forensic Analysis | Zero-Trust Policy | ITGC Compliant</strong></p>
-        <p>Generated: {analysis.repo_path} | Date: {analysis.analysis_date if hasattr(analysis, 'analysis_date') else '2026-03-13'}</p>
+        <h1>🧪 QA Architecture & Testing Strategy Report</h1>
+        <p>Forensic Repository Analysis | Repository: <code>{analysis.repo_path}</code></p>
+        <p>Generated: {analysis.analysis_date} | Compliance Target: {analysis.compliance_framework.upper()}</p>
     </div>
 
-    <div class="executive-summary">
+    <div class="methodology-card">
         <h2>📋 Executive Summary</h2>
-        <p>This report presents a comprehensive, independent testing strategy for the analyzed codebase. The analysis identified <strong>{len(analysis.modules)}</strong> modules across <strong>{len(analysis.languages)}</strong> languages with <strong>{len(analysis.frameworks)}</strong> frameworks detected. The zero-trust approach assumes <strong>0% current test coverage</strong>, requiring full test strategy development from scratch.</p>
-        <p><strong>Highest Risk Areas:</strong> {analysis.risk_assessment[0]['description'] if analysis.risk_assessment else 'No critical risks identified'}</p>
+        <p>This report presents a comprehensive, independent testing strategy for the analyzed codebase. The analysis identified <strong>{len(analysis.modules)}</strong> modules across <strong>{len(lang_keys)}</strong> languages with <strong>{len(frame_list)}</strong> frameworks detected. The zero-trust approach assumes <strong>0% current test coverage</strong>, requiring full test strategy development from scratch.</p>
+        <p><strong>Highest Risk Areas:</strong> {risk_list[0]['description'] if risk_list else 'No critical risks identified'}</p>
         <p><strong>Architecture Pattern:</strong> <code>{analysis.architecture}</code></p>
-        <p><strong>Entry Points:</strong> {', '.join(analysis.entry_points[:5])}{'...' if len(analysis.entry_points) > 5 else ''}</p>
+        <p><strong>Entry Points:</strong> {', '.join(top_entries)}{'...' if len(entry_list) > 5 else ''}</p>
     </div>
 
     <h2>📊 Codebase Statistics</h2>
@@ -676,7 +737,7 @@ class QAAuditor:
                 <td><code>{r['module']}</code></td>
                 <td>{r['risk_score']}</td>
                 <td>{r['description']}</td>
-            </tr>''' for r in analysis.risk_assessment[:15])}
+            </tr>''' for r in risk_entries)}
         </tbody>
     </table>
 
@@ -695,8 +756,6 @@ class QAAuditor:
 
     <h2>🛠️ Tooling Recommendations</h2>
     <div class="tool-recommendation">
-        <h3>Recommended Testing Stack</h3>
-        <p>Based on detected tech stack: <strong>{', '.join(analysis.languages.keys())}</strong></p>
         <ul>
             {self._generate_tool_recommendations(analysis)}
         </ul>
@@ -709,11 +768,11 @@ class QAAuditor:
     </ul>
 
     <h2>📦 Dependencies Analysis</h2>
-    <p>Total dependencies: <strong>{len(analysis.dependencies)}</strong></p>
-    {'<table><thead><tr><th>Package</th><th>Version</th><th>Type</th><th>Ecosystem</th></tr></thead><tbody>' + 
-     ''.join(f'<tr><td>{d["name"]}</td><td>{d.get("version", "N/A")}</td><td>{d.get("type", "runtime")}</td><td>{d.get("ecosystem", "unknown")}</td></tr>' 
-             for d in analysis.dependencies[:30]) + 
-     ('</tbody></table>' if analysis.dependencies else '<p>No dependencies detected</p>')}
+    <p>Total dependencies: <strong>{len(dep_list)}</strong></p>
+    <table><thead><tr><th>Package</th><th>Version</th><th>Type</th><th>Ecosystem</th></tr></thead><tbody>
+    {''.join(f'<tr><td>{d["name"]}</td><td>{d.get("version", "N/A")}</td><td>{d.get("type", "runtime")}</td><td>{d.get("ecosystem", "unknown")}</td></tr>' 
+             for d in dep_list[:30])}
+    </tbody></table>
 
     <div class="footer">
         <p><strong>QA Architecture Auditor</strong> | Zero-Trust Policy Enforced | Generated by independent forensic analysis</p>
@@ -916,18 +975,28 @@ class QAAuditor:
 
     def _assess_methodology_risk(self, analysis: CodebaseAnalysis, methodology: str) -> str:
         """Generate risk assessment specific to each methodology"""
+        # Use .get() for keys that might be missing in older saved analysis
+        auth_len = len(analysis.security_surface.get('authentication', []))
+        db_len = len(analysis.security_surface.get('database_operations', []))
+        usability_len = len(analysis.security_surface.get('usability', []))
+        session_len = len(analysis.security_surface.get('session_management', []))
+        input_len = len(analysis.security_surface.get('input_validation', []))
+        module_len = len(analysis.modules)
+        risk_len = len(analysis.risk_assessment)
+        entry_len = len(analysis.entry_points)
+        
         assessments = {
-            'black_box': f"The {len(analysis.entry_points)} entry points represent the primary black-box testing surface. Focus on {len(analysis.security_surface['authentication'])} authentication modules and {len(analysis.security_surface['database_operations'])} database interaction points.",
-            'white_box': f"With {len(analysis.modules)} modules requiring coverage, white-box testing must achieve >80% statement coverage. {len([m for m in analysis.modules if m['complexity'] > 15])} modules have high complexity (>15) and require path coverage analysis.",
-            'manual': f"Manual testing is essential for {len(analysis.security_surface['usability'])} usability-sensitive modules and {len(analysis.risk_assessment)} risk areas where automation cannot capture business logic nuances.",
-            'automated': f"All {len(analysis.entry_points)} entry points and {len(analysis.dependencies)} dependencies must be covered by automated CI/CD tests. Target: >1000 automated test cases.",
-            'unit': f"Unit tests must cover {sum(m['functions'] for m in analysis.modules)} functions and {sum(m['classes'] for m in analysis.modules)} classes across {len(analysis.modules)} modules.",
-            'integration': f"Integration tests must validate {len(analysis.data_flows)} dependency relationships and {len(analysis.security_surface['database_operations'])} database interactions.",
+            'black_box': f"The {entry_len} entry points represent the primary black-box testing surface. Focus on {auth_len} authentication modules and {db_len} database interaction points.",
+            'white_box': f"With {module_len} modules requiring coverage, white-box testing must achieve >80% statement coverage. {len([m for m in analysis.modules if m['complexity'] > 15])} modules have high complexity (>15) and require path coverage analysis.",
+            'manual': f"Manual testing is essential for {usability_len} usability-sensitive modules and {risk_len} risk areas where automation cannot capture business logic nuances.",
+            'automated': f"All {entry_len} entry points and {len(analysis.dependencies)} dependencies must be covered by automated CI/CD tests. Target: >1000 automated test cases.",
+            'unit': f"Unit tests must cover {sum(m['functions'] for m in analysis.modules)} functions and {sum(m['classes'] for m in analysis.modules)} classes across {module_len} modules.",
+            'integration': f"Integration tests must validate {len(analysis.data_flows)} dependency relationships and {db_len} database interactions.",
             'system': f"System testing must validate the complete {analysis.architecture} architecture with all {len(analysis.frameworks)} frameworks integrated.",
             'functional': f"Functional tests must cover all business logic paths. {len(analysis.security_surface['input_validation'])} modules require special input validation testing.",
-            'smoke': f"Smoke tests must cover all {len(analysis.entry_points)} entry points and core workflows: {', '.join(analysis.entry_points[:3])}.",
+            'smoke': f"Smoke tests must cover all {len(analysis.entry_points)} entry points and core workflows: {', '.join(list(analysis.entry_points)[:3])}.",
             'sanity': f"Sanity checklists must be maintained for {len(analysis.modules)} modules, with automated smoke tests for every commit.",
-            'e2e': f"E2E tests must cover {len(analysis.entry_points)} user journeys: {', '.join(analysis.entry_points[:3])}. All shall use realistic data and staging environments.",
+            'e2e': f"E2E tests must cover {len(analysis.entry_points)} user journeys: {', '.join(list(analysis.entry_points)[:3])}. All shall use realistic data and staging environments.",
             'regression': f"Regression suite must include {len(analysis.modules) * 3} minimum test cases covering all modules and their interfaces. Run on every release.",
             'api': f"API endpoints need testing. Identify via route definitions (express, django, spring, etc.). All endpoints require validation of status codes, schemas, auth, and error handling.",
             'database': f"Database integrity tests required for {len(analysis.security_surface['database_operations'])} modules with SQL operations. Test CRUD, constraints, transactions, and migrations.",
@@ -974,29 +1043,31 @@ Invalid Token = 401 Unauthorized''',
             }
         ]
 
+    def _generate_unit_cases(self, analysis: CodebaseAnalysis) -> List[Dict[str, Any]]:
+        top_modules = list(analysis.modules)[:10]
+        cases = []
+        for module in top_modules:
+            cases.append({
+                'title': f'Unit Test: {module["path"]}',
+                'example': f'# Test all {module["functions"]} functions in {module["path"]}',
+                'validation': '100% function coverage for the module'
+            })
+        return cases
+
     def _generate_white_box_cases(self, analysis: CodebaseAnalysis) -> List[Dict[str, Any]]:
-        high_complexity = [m for m in analysis.modules if m['complexity'] > 15][:3]
+        modules_sorted = sorted(list(analysis.modules), key=lambda x: x['complexity'], reverse=True)
+        high_complexity = modules_sorted[:3]
         cases = []
         for module in high_complexity:
             cases.append({
                 'title': f'Path Coverage: {module["path"]}',
                 'example': f'''# Module: {module["path"]}
 # Complexity: {module["complexity"]}
-# Test all branches and conditions
-def test_function_branches():
-    # Condition 1: True path
-    result = function(input_that_triggers_true)
-    assert result == expected_true
-    
-    # Condition 1: False path
-    result = function(input_that_triggers_false)
-    assert result == expected_false
-    
-    # Nested conditions - all combinations
-    # Use parameterized tests for full path coverage''',
-                'validation': f'Achieve 100% branch coverage for {module["path"]}'
+# Logic Path analysis required for forensic validation''',
+                'validation': 'All logical paths verified'
             })
         return cases
+
 
     def _generate_manual_cases(self, analysis: CodebaseAnalysis) -> List[Dict[str, Any]]:
         return [
@@ -1401,7 +1472,7 @@ for task in tasks:
             }
         ]
 
-    def _generate_compatibility_cases(self, analysis: CodebaseAlignment, analysis, include_test_cases: bool):
+    def _generate_compatibility_cases(self, analysis: CodebaseAnalysis) -> List[Dict[str, Any]]:
         """Generate tooling recommendations based on analysis"""
         recommendations = []
         
@@ -1435,6 +1506,155 @@ for task in tasks:
         
         return recommendations
 
+    def _generate_markdown_report(self, include_test_cases: bool) -> str:
+        """Generate a markdown version of the report"""
+        analysis = self.analysis
+        if not analysis:
+            return "# Error: Analysis results missing"
+            
+        risk_list = list(analysis.risk_assessment)
+        md = [
+            f"# QA Architecture & Testing Strategy Report",
+            f"**Repository:** {analysis.repo_path}",
+            f"**Date:** {getattr(analysis, 'analysis_date', '2026-03-13')}",
+            "",
+            "## Executive Summary",
+            f"Detected {len(analysis.modules)} modules across {len(analysis.languages)} languages.",
+            f"**Architecture:** {analysis.architecture}",
+            "",
+            "## Risk Assessment",
+            "| Severity | Type | Module | Risk Score | Description |",
+            "|----------|------|--------|------------|-------------|",
+        ]
+        
+        for r in risk_list[:15]:
+            md.append(f"| {r['severity'].upper()} | {r['type']} | `{r['module']}` | {r['risk_score']} | {r['description']} |")
+            
+        md.append("\n## Testing Methodologies")
+        methodologies = self._get_methodology_definitions()
+        for key, meth in methodologies.items():
+            md.append(f"### {meth['icon']} {meth['name']}")
+            md.append(f"**Baseline:** {meth['baseline_definition']}")
+            md.append(f"**Strategy:** {meth['strategy']}")
+            if include_test_cases:
+                md.append("\n#### Test Cases")
+                for i, test in enumerate(meth['test_cases'](analysis), 1):
+                    md.append(f"{i}. **{test['title']}**")
+                    md.append(f"   ```\n   {test['example']}\n   ```")
+                    md.append(f"   *Validation:* {test['validation']}\n")
+        
+        md.append("## ITGC Controls")
+        for control in getattr(analysis, 'itgc_controls', []):
+            md.append(f"- {control}")
+            
+        return "\n".join(md)
+
+    def _generate_tool_recommendations(self, analysis: CodebaseAnalysis) -> str:
+        """Generate tool recommendations list items for HTML"""
+        recs = self._generate_compatibility_cases(analysis)
+        return "\n".join([f"<li>{r}</li>" for r in recs])
+
+    def _generate_compatibility_recs(self, analysis: CodebaseAnalysis) -> List[str]:
+        """Generate tooling recommendations based on analysis"""
+        recommendations = []
+        
+        # Python
+        if 'python' in analysis.languages:
+            recommendations.append("pytest + pytest-cov for unit/integration, Coverage.py for reports")
+            recommendations.append("locust or k6 for performance testing")
+            recommendations.append("bandit (SAST), safety (SCA), OWASP ZAP (DAST)")
+        
+        # JavaScript/TypeScript
+        if any(lang in analysis.languages for lang in ['javascript', 'typescript']):
+            recommendations.append("Jest or Vitest for unit/integration testing")
+            recommendations.append("Cypress or Playwright for E2E")
+            recommendations.append("ESLint security plugins, npm audit for SCA")
+        
+        # Java
+        if 'java' in analysis.languages:
+            recommendations.append("JUnit 5 + Mockito for unit tests")
+            recommendations.append("Spring Boot Test or RestAssured for API testing")
+            recommendations.append("SonarQube for static analysis, OWASP Dependency Check")
+        
+        # Go
+        if 'go' in analysis.languages:
+            recommendations.append("Go test standard library with table-driven tests")
+            recommendations.append("go vet, staticcheck for static analysis")
+        
+        # General CI/CD
+        recommendations.append("CI/CD: GitHub Actions, GitLab CI, or Jenkins")
+        recommendations.append("Code coverage: Codecov or Coveralls")
+        recommendations.append("Containerization: Docker for consistent test environments")
+        
+        return recommendations
+
+    def _generate_compatibility_cases(self, analysis: CodebaseAnalysis) -> List[Dict[str, Any]]:
+        """Generate compatibility test cases as dicts for consistency"""
+        recommendations = self._generate_compatibility_recs(analysis)
+        return [{'title': 'Compatibility Check', 'example': r, 'validation': 'Tooling verified and functional'} for r in recommendations]
+
+        return recommendations
+
+    def _generate_manual_cases(self, analysis: CodebaseAnalysis) -> List[Dict[str, Any]]:
+        return [{'title': 'Critical Flow Walkthrough', 'example': 'Manual execution of top 3 workflows', 'validation': 'All steps verified by QA architect'}]
+
+    def _generate_automated_cases(self, analysis: CodebaseAnalysis) -> List[Dict[str, Any]]:
+        return [{'title': 'CI Regression Suite', 'example': 'Automated run of all high-risk module tests', 'validation': 'All tests pass in CI environment'}]
+
+    def _generate_unit_cases(self, analysis: CodebaseAnalysis) -> List[Dict[str, Any]]:
+        return [{'title': 'Function Level Validation', 'example': 'Unit tests for core logic', 'validation': '100% logic coverage'}]
+
+    def _generate_integration_cases(self, analysis: CodebaseAnalysis) -> List[Dict[str, Any]]:
+        return [
+            {'title': 'Module Interface Test', 'example': f'Verify data flow between {list(analysis.modules)[0]["path"] if analysis.modules else "modules"}', 'validation': 'Correct data handover verified'},
+            {'title': 'Database Integration', 'example': 'Verify database operations handle constraints correctly', 'validation': 'DB state remains consistent after operations'}
+        ]
+
+    def _generate_system_cases(self, analysis: CodebaseAnalysis) -> List[Dict[str, Any]]:
+        return [{'title': 'Full Architecture Validation', 'example': f'Validate {analysis.architecture} flow', 'validation': 'System components work in harmony'}]
+
+    def _generate_functional_cases(self, analysis: CodebaseAnalysis) -> List[Dict[str, Any]]:
+        return [{'title': 'Requirement Verification', 'example': 'Test feature against business requirements', 'validation': 'Feature behavior matches requirement specification'}]
+
+    def _generate_smoke_cases(self, analysis: CodebaseAnalysis) -> List[Dict[str, Any]]:
+        return [{'title': 'Deployment Health Check', 'example': 'Verify all entry points return 200', 'validation': 'Application is up and reachable'}]
+
+    def _generate_sanity_cases(self, analysis: CodebaseAnalysis) -> List[Dict[str, Any]]:
+        return [{'title': 'Scope-limited Regression', 'example': f'Verify fix in {list(analysis.risk_assessment)[0]["module"] if analysis.risk_assessment else "affected module"}', 'validation': 'Fix works without breaking immediate surroundings'}]
+
+    def _generate_e2e_cases(self, analysis: CodebaseAnalysis) -> List[Dict[str, Any]]:
+        return [{'title': 'User Journey Validation', 'example': 'Complete end-to-end checkout/sign-up journey', 'validation': 'Goal achieved from start to finish'}]
+
+    def _generate_regression_cases(self, analysis: CodebaseAnalysis) -> List[Dict[str, Any]]:
+        return [{'title': 'Total Impact Analysis', 'example': 'Full suite execution on release branch', 'validation': 'No regressions detected across any features'}]
+
+    def _generate_api_cases(self, analysis: CodebaseAnalysis) -> List[Dict[str, Any]]:
+        return [{'title': 'Endpoint Schema Validation', 'example': 'Verify JSON response matches expected schema', 'validation': 'Correct headers and payload'}]
+
+    def _generate_database_cases(self, analysis: CodebaseAnalysis) -> List[Dict[str, Any]]:
+        return [{'title': 'Persistence Layer Integrity', 'example': 'Test concurrent writes to high-traffic modules', 'validation': 'No data corruption or deadlocks'}]
+
+    def _generate_performance_cases(self, analysis: CodebaseAnalysis) -> List[Dict[str, Any]]:
+        return [{'title': 'Stress Test Entry Points', 'example': 'Simulated load on main entry points', 'validation': 'Response time < 500ms at 100 concurrent users'}]
+
+    def _generate_security_cases(self, analysis: CodebaseAnalysis) -> List[Dict[str, Any]]:
+        return [{'title': 'Injection Vulnerability Scan', 'example': 'Test all input fields for common injection patterns', 'validation': 'Zero successful injections detected'}]
+
+    def _generate_usability_cases(self, analysis: CodebaseAnalysis) -> List[Dict[str, Any]]:
+        return [{'title': 'UI Feedback Loop', 'example': 'Observe user navigating core features', 'validation': 'Zero navigation friction reported'}]
+
+    def _generate_accessibility_cases(self, analysis: CodebaseAnalysis) -> List[Dict[str, Any]]:
+        return [{'title': 'WCAG 2.1 Compliance', 'example': 'Run Axe-core on main entry points', 'validation': 'Zero critical accessibility violations'}]
+
+    def _generate_localization_cases(self, analysis: CodebaseAnalysis) -> List[Dict[str, Any]]:
+        return [{'title': 'RTL Layout Check', 'example': 'Switch app to Arabic and verify no layout overlap', 'validation': 'Correct mirroring and text rendering'}]
+
+    def _generate_acceptance_cases(self, analysis: CodebaseAnalysis) -> List[Dict[str, Any]]:
+        return [{'title': 'User Persona Walkthrough', 'example': 'Admin user creates and deletes project', 'validation': 'All business constraints respected'}]
+
+    def _generate_exploratory_cases(self, analysis: CodebaseAnalysis) -> List[Dict[str, Any]]:
+        return [{'title': 'Chaotic Input Session', 'example': 'Rapid input and unexpected navigation sequences', 'validation': 'System remains stable without crashes or data corruption'}]
+
 def main():
     parser = argparse.ArgumentParser(description='Perform forensic QA architecture analysis and generate testing strategy report.')
     parser.add_argument('--repo', '-r', required=True, help='Repository path or git URL')
@@ -1463,6 +1683,13 @@ def main():
     output_path = Path(args.output)
     output_path.write_text(report, encoding='utf-8')
     print(f"✅ Report generated: {output_path.resolve()}")
+
+    # Fix: also generate markdown version if specifically helpful
+    if args.format == 'html':
+        md_report = auditor.generate_report(format='md', include_test_cases=args.include_test_cases)
+        md_path = output_path.with_suffix('.md')
+        md_path.write_text(md_report, encoding='utf-8')
+        print(f"✅ Markdown version also generated: {md_path.resolve()}")
 
 if __name__ == '__main__':
     main()
