@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+.idea/
+.vscode/
+*.egg-info/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Sensitive
+.env
+.secrets/
+
+# OpenClaw specific (if any)
+*.tmp
+
+# Reports generated during testing (not part of the skill)
+sample-report.*
+qa-report.*

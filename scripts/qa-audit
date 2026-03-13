@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+"""
+QA Architecture Auditor - CLI Entry Point
+
+This is the main command-line interface for the qa-architecture-auditor skill.
+
+Usage:
+    qa-audit --repo /path/to/repo --output report.html
+    qa-audit --repo https://github.com/org/repo --format md
+    qa-audit --repo ./myapp --security-scan --compliance itgc
+"""
+
+import sys
+import os
+import argparse
+from pathlib import Path
+
+# Add the skill's scripts directory to Python path
+skill_dir = Path(__file__).parent
+sys.path.insert(0, str(skill_dir))
+
+from analyze_repo import QAAuditor, CodebaseAnalysis
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Perform forensic QA architecture analysis and generate testing strategy report.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  %(prog)s --repo /path/to/project --output qa-report.html
+  %(prog)s --repo https://github.com/org/repo.git --format md --include-test-cases
+  %(prog)s --repo ./myapp --security-scan --compliance soc2
+  
+Note: This skill uses zero-trust policy - it ignores any existing tests in the repository.
+        '''
+    )
+    
+    parser.add_argument(
+        '--repo', '-r',
+        required=True,
+        help='Repository path (local) or git URL (HTTPS/SSH)'
+    )
+    
+    parser.add_argument(
+        '--output', '-o',
+        default='qa-report.html',
+        help='Output file path (default: qa-report.html)'
+    )
+    
+    parser.add_argument(
+        '--format', '-f',
+        choices=['html', 'md'],
+        default='html',
+        help='Output format (default: html)'
+    )
+    
+    parser.add_argument(
+        '--include-test-cases',
+        action='store_true',
+        default=True,
+        help='Include detailed test cases for each methodology (default: True)'
+    )
+    
+    parser.add_argument(
+        '--exclude', '-e',
+        default='node_modules,.git,__pycache__,.venv,venv,build,dist,target,bin,obj,.idea,.vscode',
+        help='Comma-separated list of directories to exclude (default: node_modules,.git,...)'
+    )
+    
+    parser.add_argument(
+        '--max-depth',
+        type=int,
+        default=10,
+        help='Maximum directory traversal depth (default: 10)'
+    )
+    
+    parser.add_argument(
+        '--security-scan',
+        action='store_true',
+        help='Perform additional security vulnerability scanning (may take longer)'
+    )
+    
+    parser.add_argument(
+        '--compliance',
+        choices=['itgc', 'soc2', 'iso27001', 'hipaa', 'gdpr', 'pci', 'fedramp'],
+        default='itgc',
+        help='Target compliance framework (default: itgc)'
+    )
+    
+    parser.add_argument(
+        '--quiet', '-q',
+        action='store_true',
+        help='Reduce verbose output'
+    )
+    
+    args = parser.parse_args()
+    
+    # Print banner
+    if not args.quiet:
+        print("=" * 60)
+        print("🧪 QA Architecture Auditor")
+        print("   Independent Forensic Analysis | Zero-Trust Policy")
+        print("=" * 60)
+    
+    # Validate repository path/URL
+    repo_path = Path(args.repo)
+    if not repo_path.exists() and not args.repo.startswith(('http://', 'https://', 'git@', 'ssh://')):
+        print(f"❌ Error: Repository path does not exist: {args.repo}")
+        print("   Provide a valid local path or git URL (HTTPS/SSH)")
+        return 1
+    
+    # Exclude directories
+    exclude_dirs = [d.strip() for d in args.exclude.split(',') if d.strip()]
+    
+    try:
+        # Step 1: Analyze repository
+        if not args.quiet:
+            print(f"\n🔍 Analyzing repository: {args.repo}")
+            print(f"   Excluding: {', '.join(exclude_dirs)}")
+            
+        auditor = QAAuditor(args.repo, exclude_dirs=exclude_dirs)
+        analysis = auditor.analyze()
+        
+        # Add metadata
+        analysis.analysis_date = '2026-03-13'
+        analysis.compliance_framework = args.compliance
+        analysis.security_scan_performed = args.security_scan
+        
+        # Step 2: Generate report
+        if not args.quiet:
+            print(f"\n📋 Generating {args.format.upper()} report...")
+            print(f"   Including test cases: {args.include_test_cases}")
+            print(f"   Compliance framework: {args.compliance}")
+            
+        report = auditor.generate_report(
+            format=args.format,
+            include_test_cases=args.include_test_cases
+        )
+        
+        # Step 3: Write output
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(report, encoding='utf-8')
+        
+        # Summary
+        if not args.quiet:
+            print("\n" + "=" * 60)
+            print("✅ ANALYSIS COMPLETE")
+            print("=" * 60)
+            print(f"Report saved to: {output_path.resolve()}")
+            print(f"Total modules analyzed: {len(analysis.modules)}")
+            print(f"Languages detected: {len(analysis.languages)}")
+            print(f"Risk areas identified: {len(analysis.risk_assessment)}")
+            print(f"Entry points tested: {len(analysis.entry_points)}")
+            print("\n📊 Key Statistics:")
+            print(f"   - Total files: {sum(analysis.languages.values())}")
+            print(f"   - Dependencies: {len(analysis.dependencies)}")
+            print(f"   - High-risk modules: {len([r for r in analysis.risk_assessment if r['severity'] in ['critical', 'high']])}")
+            print(f"\n⚠️  Remember: Zero-Trust policy applied — no existing tests considered.")
+            print("   All test strategies must be implemented from scratch.")
+            print("=" * 60)
+        else:
+            print(f"Report: {output_path.resolve()}")
+            
+        return 0
+        
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Analysis interrupted by user")
+        return 130
+        
+    except Exception as e:
+        print(f"\n❌ Error during analysis: {e}")
+        if not args.quiet:
+            import traceback
+            traceback.print_exc()
+        return 1
+
+if __name__ == '__main__':
+    sys.exit(main())
